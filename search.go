@@ -6,42 +6,59 @@ import (
 	"sync"
 )
 
-func recursiveSearch(root string, filter func(string) bool, wg *sync.WaitGroup, results *[]string, errChan chan error) {
-	defer wg.Done() // Ensure this goroutine is done when it finishes
+func recursiveSearch(root string, filter func(string) bool, wg *sync.WaitGroup, resultChan chan string, errChan chan error) {
+	defer wg.Done()
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		errChan <- err // エラーが発生した場合、エラーをチャネルに送信
+		errChan <- err
 		return
 	}
 
-	var mu sync.Mutex
 	for _, entry := range entries {
 		fullPath := filepath.Join(root, entry.Name())
 		if entry.IsDir() {
 			wg.Add(1)
-			go recursiveSearch(fullPath, filter, wg, results, errChan)
+			go recursiveSearch(fullPath, filter, wg, resultChan, errChan)
 		} else if filter(fullPath) {
-			mu.Lock()
-			*results = append(*results, fullPath)
-			mu.Unlock()
+			resultChan <- fullPath
 		}
 	}
 }
 
 func SearchFiles(root string, filter func(string) bool) ([]string, error) {
-	var results []string
+	results := make(chan string)
+	errors := make(chan error)
+
 	var wg sync.WaitGroup
-	errChan := make(chan error, 1) // エラーを受け取るチャネルを作成
 	wg.Add(1)
-	go recursiveSearch(root, filter, &wg, &results, errChan)
+	go recursiveSearch(root, filter, &wg, results, errors)
 
-	wg.Wait()      // 全ての goroutine が完了するのを待つ
-	close(errChan) // チャネルを閉じる
+	go func() {
+		wg.Wait()
+		close(results)
+		close(errors)
+	}()
 
-	// チャネルからエラーを受け取って返す
-	if err := <-errChan; err != nil {
-		return nil, err
+	var foundFiles []string
+	for {
+		select {
+		case result, ok := <-results:
+			if !ok {
+				results = nil
+			} else {
+				foundFiles = append(foundFiles, result)
+			}
+		case err, ok := <-errors:
+			if !ok {
+				errors = nil
+			} else {
+				return nil, err
+			}
+		}
+		if results == nil && errors == nil {
+			break
+		}
 	}
 
-	return results, nil
+	return foundFiles, nil
 }
