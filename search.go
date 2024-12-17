@@ -6,60 +6,42 @@ import (
 	"sync"
 )
 
-func SearchFiles(root string, filter func(string) bool) ([]string, error) {
-	var results []string
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	errChan := make(chan error, 1)
-	resultChan := make(chan string)
-
-	// Worker function to process directories in parallel
-	var worker func(path string, wg *sync.WaitGroup)
-	worker = func(path string, wg *sync.WaitGroup) {
-		defer wg.Done() // Ensure this goroutine is done when it finishes
-
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			errChan <- err
-			return
-		}
-
-		for _, entry := range entries {
-			fullPath := filepath.Join(path, entry.Name())
-			if filter(fullPath) {
-				resultChan <- fullPath
-			}
-			if entry.IsDir() {
-				// Add a new goroutine for subdirectories before calling it
-				wg.Add(1)
-				go worker(fullPath, wg)
-			}
-		}
+func recursiveSearch(root string, filter func(string) bool, wg *sync.WaitGroup, results *[]string, errChan chan error) {
+	defer wg.Done() // Ensure this goroutine is done when it finishes
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		errChan <- err // エラーが発生した場合、エラーをチャネルに送信
+		return
 	}
 
-	// Start the search with the root directory
-	wg.Add(1)
-	go worker(root, &wg)
-
-	// Collect results and handle errors
-	go func() {
-		wg.Wait()
-		close(resultChan)
-		close(errChan)
-	}()
-
-	// Process results and errors
-	for {
-		select {
-		case err := <-errChan:
-			return nil, err
-		case result, ok := <-resultChan:
-			if !ok {
-				return results, nil
-			}
+	var mu sync.Mutex
+	for _, entry := range entries {
+		fullPath := filepath.Join(root, entry.Name())
+		if entry.IsDir() {
+			wg.Add(1)
+			go recursiveSearch(fullPath, filter, wg, results, errChan)
+		} else if filter(fullPath) {
 			mu.Lock()
-			results = append(results, result)
+			*results = append(*results, fullPath)
 			mu.Unlock()
 		}
 	}
+}
+
+func SearchFiles(root string, filter func(string) bool) ([]string, error) {
+	var results []string
+	var wg sync.WaitGroup
+	errChan := make(chan error, 1) // エラーを受け取るチャネルを作成
+	wg.Add(1)
+	go recursiveSearch(root, filter, &wg, &results, errChan)
+
+	wg.Wait()      // 全ての goroutine が完了するのを待つ
+	close(errChan) // チャネルを閉じる
+
+	// チャネルからエラーを受け取って返す
+	if err := <-errChan; err != nil {
+		return nil, err
+	}
+
+	return results, nil
 }
