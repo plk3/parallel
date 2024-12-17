@@ -6,8 +6,13 @@ import (
 	"sync"
 )
 
-func recursiveSearch(root string, filter func(string) bool, wg *sync.WaitGroup, resultChan chan string, errChan chan error) {
+func recursiveSearch(root string, maxDepth int, filter func(string) bool, wg *sync.WaitGroup, resultChan chan string, errChan chan error) {
 	defer wg.Done()
+	// -2以下で渡せば、最大までループ
+	if maxDepth == -1 {
+		return
+	}
+
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		errChan <- err
@@ -18,7 +23,7 @@ func recursiveSearch(root string, filter func(string) bool, wg *sync.WaitGroup, 
 		fullPath := filepath.Join(root, entry.Name())
 		if entry.IsDir() {
 			wg.Add(1)
-			go recursiveSearch(fullPath, filter, wg, resultChan, errChan)
+			go recursiveSearch(fullPath, maxDepth-1, filter, wg, resultChan, errChan)
 		} else if filter(fullPath) {
 			resultChan <- fullPath
 		}
@@ -26,12 +31,17 @@ func recursiveSearch(root string, filter func(string) bool, wg *sync.WaitGroup, 
 }
 
 func SearchFiles(root string, filter func(string) bool) ([]string, error) {
+	return SearchFilesWithDepth(root, -2, filter)
+}
+
+// depth 0でrootだけ検索
+func SearchFilesWithDepth(root string, maxDepth int, filter func(string) bool) ([]string, error) {
 	results := make(chan string)
 	errors := make(chan error)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go recursiveSearch(root, filter, &wg, results, errors)
+	go recursiveSearch(root, maxDepth, filter, &wg, results, errors)
 
 	go func() {
 		wg.Wait()
