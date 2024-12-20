@@ -1,17 +1,20 @@
-package main
+package search
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 )
 
-func recursiveSearch(root string, maxDepth int, filter func(string) bool, wg *sync.WaitGroup, resultChan chan string, errChan chan error) {
+// recursiveSearch handles recursive directory traversal with goroutine limits
+func recursiveSearch(root string, filter func(string) bool, wg *sync.WaitGroup, resultChan chan<- string, errChan chan<- error, sem chan struct{}) {
 	defer wg.Done()
-	// -2以下で渡せば、最大までループ
-	if maxDepth == -1 {
-		return
-	}
+
+	// Acquire a slot in the semaphore
+	sem <- struct{}{}
+	defer func() { <-sem }() // Release the slot when done
 
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -23,51 +26,58 @@ func recursiveSearch(root string, maxDepth int, filter func(string) bool, wg *sy
 		fullPath := filepath.Join(root, entry.Name())
 		if entry.IsDir() {
 			wg.Add(1)
-			go recursiveSearch(fullPath, maxDepth-1, filter, wg, resultChan, errChan)
+			go recursiveSearch(fullPath, filter, wg, resultChan, errChan, sem)
 		} else if filter(fullPath) {
 			resultChan <- fullPath
 		}
 	}
 }
 
+// SearchFiles searches files matching the filter in the given root directory
+// with a limit on the maximum number of concurrent goroutines
 func SearchFiles(root string, filter func(string) bool) ([]string, error) {
-	return SearchFilesWithDepth(root, -2, filter)
-}
-
-// depth 0でrootだけ検索
-func SearchFilesWithDepth(root string, maxDepth int, filter func(string) bool) ([]string, error) {
-	results := make(chan string)
-	errors := make(chan error)
-
+	resultChan := make(chan string, 100)
+	errChan := make(chan error)
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go recursiveSearch(root, maxDepth, filter, &wg, results, errors)
 
+	// Semaphore to limit concurrent goroutines
+	sem := make(chan struct{}, runtime.NumCPU()*2)
+
+	// Start the recursive search
+	wg.Add(1)
+	go recursiveSearch(root, filter, &wg, resultChan, errChan, sem)
+
+	// Close channels when all goroutines complete
 	go func() {
 		wg.Wait()
-		close(results)
-		close(errors)
+		close(resultChan)
+		close(errChan)
 	}()
 
 	var foundFiles []string
-	for {
+	var errs []error
+
+	// Collect results and errors
+	for resultChan != nil || errChan != nil {
 		select {
-		case result, ok := <-results:
-			if !ok {
-				results = nil
-			} else {
+		case result, ok := <-resultChan:
+			if ok {
 				foundFiles = append(foundFiles, result)
-			}
-		case err, ok := <-errors:
-			if !ok {
-				errors = nil
 			} else {
-				return nil, err
+				resultChan = nil
+			}
+		case err, ok := <-errChan:
+			if ok {
+				errs = append(errs, err)
+			} else {
+				errChan = nil
 			}
 		}
-		if results == nil && errors == nil {
-			break
-		}
+	}
+
+	// Handle accumulated errors
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
 	}
 
 	return foundFiles, nil
